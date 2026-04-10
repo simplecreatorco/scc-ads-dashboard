@@ -643,6 +643,16 @@
 <!-- PAGE -->
 <div class="page">
 
+  <!-- FIREBASE STATUS BANNER — hidden by default, shown if Firebase fails -->
+  <div id="fb-banner" style="display:none; background:#FFF3D6; border:2px solid #F3B548; border-radius:14px; padding:14px 20px; margin-bottom:24px; align-items:center; gap:12px;">
+    <span style="font-size:18px;">⚠️</span>
+    <div style="flex:1;">
+      <div style="font-family:'Quick',sans-serif;font-size:10px;text-transform:uppercase;letter-spacing:2px;color:#B8852A;margin-bottom:3px;">Sync Unavailable</div>
+      <div id="fb-banner-detail" style="font-size:13px;color:#7A5A1A;line-height:1.5;">Could not connect to Firebase — retrying automatically. Your data won't save until the connection is restored.</div>
+    </div>
+    <button onclick="location.reload()" style="background:#F3B548;color:#fff;border:none;border-radius:50px;padding:9px 18px;font-family:'Quick',sans-serif;font-size:10px;text-transform:uppercase;letter-spacing:2px;cursor:pointer;white-space:nowrap;">Reload</button>
+  </div>
+
   <div class="stats-row">
     <div class="stat-card">
       <div class="stat-label">Drafts This Week</div>
@@ -907,32 +917,105 @@
 <div class="toast" id="toastEl"></div>
 
 <script type="module">
-  import { initializeApp }                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-  import { getFirestore, doc, getDoc, setDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  // Firebase — with auto-retry if initial load fails
+  let db = null;
+  let fbGetFn = null, fbSetFn = null;
+  let fbRetryTimer = null;
 
-  const app = initializeApp({
-    apiKey:            "AIzaSyAiozCUApOYfzlxaPfnwGfjy39GX2Cn2a4",
-    authDomain:        "scc-agent-hub-x7k9.firebaseapp.com",
-    projectId:         "scc-agent-hub-x7k9",
-    storageBucket:     "scc-agent-hub-x7k9.firebasestorage.app",
-    messagingSenderId: "366128470117",
-    appId:             "1:366128470117:web:fe765dfbe04d594232ce8c"
-  });
-  const db = getFirestore(app);
-
-  async function fbGet(key) {
+  async function initFirebase() {
     try {
-      const snap = await getDoc(doc(db, 'hub', key));
-      return snap.exists() ? snap.data().value : null;
-    } catch(e) { console.error('fbGet', key, e); return null; }
-  }
+      const { initializeApp }                     = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
+      const { getFirestore, doc, getDoc, setDoc } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
 
-  async function fbSet(key, val) {
-    try {
-      await setDoc(doc(db, 'hub', key), { value: val });
+      const app = initializeApp({
+        apiKey:            "AIzaSyAiozCUApOYfzlxaPfnwGfjy39GX2Cn2a4",
+        authDomain:        "scc-agent-hub-x7k9.firebaseapp.com",
+        projectId:         "scc-agent-hub-x7k9",
+        storageBucket:     "scc-agent-hub-x7k9.firebasestorage.app",
+        messagingSenderId: "366128470117",
+        appId:             "1:366128470117:web:fe765dfbe04d594232ce8c"
+      });
+      db = getFirestore(app);
+
+      fbGetFn = async (key) => {
+        try {
+          const snap = await getDoc(doc(db, 'hub', key));
+          return snap.exists() ? snap.data().value : null;
+        } catch(e) { console.error('fbGet', key, e); return null; }
+      };
+
+      fbSetFn = async (key, val) => {
+        try {
+          await setDoc(doc(db, 'hub', key), { value: val });
+          return true;
+        } catch(e) { console.error('fbSet', key, e); return false; }
+      };
+
+      // Confirm connection with a real read
+      await fbGetFn('_ping');
+
+      console.log('Firebase connected');
+      hideFbBanner();
+      if (fbRetryTimer) { clearInterval(fbRetryTimer); fbRetryTimer = null; }
       return true;
-    } catch(e) { console.error('fbSet', key, e); return false; }
+    } catch(e) {
+      console.warn('Firebase unavailable:', e.message);
+      return false;
+    }
   }
+
+  function showFbBanner(msg) {
+    const banner = document.getElementById('fb-banner');
+    const detail = document.getElementById('fb-banner-detail');
+    if (banner) banner.style.display = 'flex';
+    if (detail && msg) detail.textContent = msg;
+  }
+
+  function hideFbBanner() {
+    const banner = document.getElementById('fb-banner');
+    if (banner) banner.style.display = 'none';
+  }
+
+  function startFbRetry() {
+    if (fbRetryTimer) return; // already retrying
+    let attempt = 0;
+    const intervals = [5000, 10000, 20000, 30000]; // 5s, 10s, 20s, then 30s forever
+    const tryAgain = async () => {
+      attempt++;
+      const nextDelay = intervals[Math.min(attempt, intervals.length - 1)];
+      const detail = document.getElementById('fb-banner-detail');
+      if (detail) detail.textContent = `Not connected — retrying in ${nextDelay/1000}s… (attempt ${attempt})`;
+      const ok = await initFirebase();
+      if (ok) {
+        // Reload persisted data now that we're back
+        loadPersistedData().catch(() => {});
+        toast('✓ Sync restored — your data is saving again.');
+      } else {
+        fbRetryTimer = setTimeout(tryAgain, nextDelay);
+      }
+    };
+    fbRetryTimer = setTimeout(tryAgain, intervals[0]);
+  }
+
+  // Safe wrappers — show banner and start retry if Firebase isn't ready
+  async function fbGet(key) {
+    if (!fbGetFn) { showFbBanner('Not connected — retrying shortly…'); startFbRetry(); return null; }
+    return fbGetFn(key);
+  }
+  async function fbSet(key, val) {
+    if (!fbSetFn) { showFbBanner('Not connected — retrying shortly…'); startFbRetry(); return false; }
+    const result = await fbSetFn(key, val);
+    if (result === false) { showFbBanner('Save failed — retrying shortly…'); startFbRetry(); }
+    return result;
+  }
+
+  // Initial Firebase load
+  const firebaseReady = await initFirebase();
+  if (!firebaseReady) {
+    showFbBanner('Could not connect — retrying automatically…');
+    startFbRetry();
+  }
+
 
   const AGENTS = [
     { num:1, icon:'🗂️', name:'Topic Cluster Manager',      model:'Haiku 4.5',  desc:'Reads topic log · assigns cluster + funnel gap · passes targeting brief to Agent 2' },
@@ -1652,7 +1735,7 @@
 
   // ── BOOT SEQUENCE ──
   async function bootApp(email) {
-    // Dismiss login screen
+    // Dismiss login screen IMMEDIATELY — don't wait for Firebase
     const ls = document.getElementById('login-screen');
     ls.classList.add('fade-out');
     setTimeout(() => ls.classList.add('gone'), 380);
@@ -1662,11 +1745,11 @@
     document.getElementById('user-pill').style.display = 'flex';
     document.getElementById('logout-btn').style.display = 'block';
 
-    // Load all persisted data from Firebase
-    await loadPersistedData();
-
-    // Existing init
+    // Render agents right away so the dashboard is live
     renderAgents();
+
+    // Load Firebase data in the background — won't block the dashboard
+    loadPersistedData().catch(e => console.warn('loadPersistedData error:', e));
   }
 
   // Wire login button events
