@@ -1412,15 +1412,13 @@
     const posts = parseInt(batch) || 1;
     await fbSet('schedule', { days, time, posts, savedAt: new Date().toISOString() });
 
-    // Push to bridge server (best-effort, non-blocking)
-    try {
-      await fetch('http://localhost:3001/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days, time, posts }),
-        signal: AbortSignal.timeout(2500),
-      });
-    } catch { /* offline is fine */ }
+    // Push to bridge server — completely fire and forget, never awaited
+    fetch('http://localhost:3001/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days, time, posts }),
+      signal: AbortSignal.timeout(2500),
+    }).catch(() => {}); // swallow ALL outcomes — 404, timeout, offline
   }
 
   function editSchedule() {
